@@ -5,7 +5,8 @@ import time
 
 # Boto3 lee automáticamente las credenciales de las variables de entorno de la terminal
 sqs = boto3.client('sqs', region_name='us-east-1')
-queue_url = 'https://sqs.us-east-1.amazonaws.com/729017152804/v2x-events'
+respuesta = sqs.get_queue_url(QueueName='v2x-events')
+queue_url = respuesta['QueueUrl']
 
 # Lista de al menos 5 vehículos exigidos por el requisito
 vehiculos = ["veh-001", "veh-002", "veh-003", "veh-004", "veh-005"]
