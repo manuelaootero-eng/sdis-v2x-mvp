@@ -4,7 +4,8 @@ import json
 # Boto3 cogerá automáticamente las credenciales de la terminal
 sqs = boto3.client('sqs', region_name='us-east-1')
 
-queue_url = 'https://sqs.us-east-1.amazonaws.com/729017152804/v2x-events'
+respuesta = sqs.get_queue_url(QueueName='v2x-events')
+queue_url = respuesta['QueueUrl']
 
 print("Iniciando V2X-SERVICE... Escuchando eventos continuamente. (Pulsa Ctrl+C para salir)")
 
