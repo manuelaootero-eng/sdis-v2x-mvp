@@ -2,6 +2,7 @@ import boto3
 import json
 import random
 import time
+from datetime import datetime, timezone
 
 # Boto3 lee automáticamente las credenciales de las variables de entorno de la terminal
 sqs = boto3.client('sqs', region_name='us-east-1')
@@ -25,6 +26,8 @@ for i in range(5):
         "event_id": f"evt-{random.randint(1000, 9999)}",
         "source_id": source_id,
         "event_type": event_type,
+        "event_time": datetime.now(timezone.utc).isoformat(),
+        "location": "segment-A12",
         "payload": {
             "speed": speed,
             "braking_intensity": "high" if event_type == "sudden braking" else "normal"
