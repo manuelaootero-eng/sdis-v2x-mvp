@@ -3,6 +3,8 @@ name: V2X MVP CI/CD Pipeline
 on:
   push:
     branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
 
 jobs:
   build-and-test:
