@@ -11,4 +11,4 @@ COPY consumidor_v2x.py .
 COPY productor_v2x.py .
 
 # Comando por defecto al arrancar el contenedor
-CMD ["python3", "consumidor_v2x.py"]
+CMD ["python3", "-u", "consumidor_v2x.py"]
