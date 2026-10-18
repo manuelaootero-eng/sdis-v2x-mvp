@@ -14,6 +14,11 @@ LOG_STREAM = 'consumidor-ec2'
 
 # Intentamos crear el Log Stream en CloudWatch por si no existe
 try:
+    logs.create_log_group(logGroupName=LOG_GROUP)
+except logs.exceptions.ResourceAlreadyExistsException:
+    pass
+
+try:
     logs.create_log_stream(logGroupName=LOG_GROUP, logStreamName=LOG_STREAM)
 except logs.exceptions.ResourceAlreadyExistsException:
     pass
