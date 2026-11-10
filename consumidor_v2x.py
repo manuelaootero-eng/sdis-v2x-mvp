@@ -5,7 +5,7 @@ import threading
 import requests
 from flask import Flask, request, jsonify
 
-# Clientes de AWS (Lee las credenciales del entorno)
+# Clientes de AWS
 sqs = boto3.client('sqs', region_name='us-east-1')
 logs = boto3.client('logs', region_name='us-east-1')
 
@@ -25,24 +25,19 @@ try:
 except logs.exceptions.ResourceAlreadyExistsException:
     pass
 
-# ==========================================
-# SERVIDOR HTTP PARA SNS (TAREA MANUELA)
-# ==========================================
+# Servidor HTTP para SNS (Tarea Manuela)
 app = Flask(__name__)
 
 @app.route('/sns-notifications', methods=['POST'])
 def sns_notifications():
-    # SNS envía el payload como texto, intentamos convertirlo a JSON
     try:
         data = json.loads(request.data)
     except ValueError:
         return jsonify({"status": "Invalid JSON"}), 400
 
-    # Comprobamos qué tipo de mensaje nos manda AWS SNS
     msg_type = request.headers.get('x-amz-sns-message-type')
 
     if msg_type == 'SubscriptionConfirmation':
-        # Confirmación automática de la suscripción HTTP
         subscribe_url = data.get('SubscribeURL')
         if subscribe_url:
             requests.get(subscribe_url)
@@ -50,17 +45,13 @@ def sns_notifications():
         return "OK", 200
 
     elif msg_type == 'Notification':
-        # Recepción de una alerta real desde la nube
         mensaje = data.get('Message')
         print(f"🚨 ALERTA GLOBAL RECIBIDA DE SNS: {mensaje}")
-        # (Aquí Eva añadirá el código para reenviar por MQTT a los vehículos)
         return "OK", 200
 
     return "OK", 200
 
-# ==========================================
-# LÓGICA ORIGINAL DEL MVP EN SEGUNDO PLANO
-# ==========================================
+# Lógica original de lectura SQS en segundo plano
 def leer_sqs_continuamente():
     print("Iniciando lectura de SQS en segundo plano...")
     while True:
@@ -99,10 +90,6 @@ def leer_sqs_continuamente():
 
 if __name__ == '__main__':
     print("Iniciando RSU (Servidor Web en puerto 80 + Procesamiento Edge)...")
-    
-    # Lanzamos el bucle original de SQS en un hilo separado
     hilo_sqs = threading.Thread(target=leer_sqs_continuamente, daemon=True)
     hilo_sqs.start()
-    
-    # Lanzamos el servidor web para escuchar a SNS
     app.run(host='0.0.0.0', port=80)
