@@ -1,0 +1,12 @@
+<!-- Renombrar a cyclonedds.xml y poner la IP de la interfaz que se quiere usar.
+     127.0.0.1 = todo en el mismo ordenador. Para varios ordenadores: la IP de la red local
+     (Windows: ipconfig · macOS: ipconfig getifaddr en0 · Ubuntu: hostname -I) -->
+<CycloneDDS>
+  <Domain Id="any">
+    <General>
+      <Interfaces>
+        <NetworkInterface address="127.0.0.1" multicast="true"/>
+      </Interfaces>
+    </General>
+  </Domain>
+</CycloneDDS>
