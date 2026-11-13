@@ -1,0 +1,12 @@
+pycache/
+*.py[cod]
+*$py.class
+*.log
+vehiculos_config.txt
+simulador_ground_truth.json
+limpiar_dynamo.py
+paracomprobar.txt
+guia_presentacion.txt
+.vscode/
+.idea/
+.env
