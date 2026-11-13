@@ -1,45 +1,239 @@
-import boto3
+import argparse
 import json
 import random
+import threading
 import time
+import uuid
 from datetime import datetime, timezone
+import paho.mqtt.client as mqtt
 
-# Boto3 lee automáticamente las credenciales de las variables de entorno de la terminal
-sqs = boto3.client('sqs', region_name='us-east-1')
-respuesta = sqs.get_queue_url(QueueName='v2x-events')
-queue_url = respuesta['QueueUrl']
+from v2x_logic import BRAKING_THRESHOLD, HIGHWAY_LENGTH_M
 
-# Lista de al menos 5 vehículos exigidos por el requisito
-vehiculos = ["veh-001", "veh-002", "veh-003", "veh-004", "veh-005"]
-tipos_evento = ["position", "sudden braking", "hazard"]
+print_lock = threading.Lock()
+stop_event = threading.Event()
 
-print("Iniciando simulación de tráfico para 5 vehículos...")
 
-for i in range(5):
-    source_id = random.choice(vehiculos)
-    event_type = random.choice(tipos_evento)
-    
-    # Si el tipo es frenada brusca, simulamos una velocidad baja o intensidad alta para la alerta
-    speed = random.randint(10, 30) if event_type == "sudden braking" else random.randint(50, 120)
-    
-    evento_v2x = {
-        "event_id": f"evt-{random.randint(1000, 9999)}",
-        "source_id": source_id,
-        "event_type": event_type,
-        "event_time": datetime.now(timezone.utc).isoformat(),
-        "location": "segment-A12",
-        "payload": {
-            "speed": speed,
-            "braking_intensity": "high" if event_type == "sudden braking" else "normal"
+class VehiculoOBU(threading.Thread):
+    def __init__(self, veh_id: str, pos_inicial: float, vel_ms: float, dt: float, rsu_endpoints: dict, fault_cfg: dict):
+        super().__init__(daemon=True)
+        self.veh_id = veh_id
+        self.posicion_x = float(pos_inicial)
+        self.vel_base_ms = float(vel_ms)
+        self.velocidad_ms = float(vel_ms)
+        self.aceleracion = 0.0
+        self.dt = float(dt)
+        self.rsu_endpoints = rsu_endpoints
+        self.fault_cfg = fault_cfg
+        self.tick = 0
+
+        self.stats = {
+            "generated": 0,
+            "sent_unique": 0,
+            "mqtt_publishes": 0,
+            "dropped": 0,
+            "delayed": 0,
+            "duplicated_extra": 0,
         }
+
+        self.rsu_actual = "rsu-1" if self.posicion_x < 1000.0 else "rsu-2"
+        self.mqtt_client = None
+        self._conectar_mqtt(self.rsu_actual)
+
+    def _conectar_mqtt(self, rsu_id: str):
+        self.cerrar()
+        host, port = self.rsu_endpoints[rsu_id]
+        client = mqtt.Client(client_id=f"{self.veh_id}-{rsu_id}-{uuid.uuid4().hex[:6]}")
+        client.reconnect_delay_set(min_delay=1, max_delay=5)
+
+        def on_connect(c, userdata, flags, rc):
+            if rc == 0:
+                c.subscribe(f"v2x/{rsu_id}/alerts", qos=1)
+
+        def on_message(c, userdata, msg):
+            try:
+                alerta = json.loads(msg.payload.decode("utf-8"))
+                with print_lock:
+                    print(f" 📲 [{self.veh_id}] ALERTA RECIBIDA en {rsu_id.upper()}: {alerta.get('message')}")
+            except Exception as e:
+                with print_lock:
+                    print(f" [WARN] Error procesando alerta MQTT en {self.veh_id}: {e}")
+
+        client.on_connect = on_connect
+        client.on_message = on_message
+        try:
+            client.connect_async(host, port, keepalive=60)
+            client.loop_start()
+        except Exception as e:
+            with print_lock:
+                print(f" [MQTT WARN] {self.veh_id} fallo conectando a {rsu_id} ({host}:{port}): {e}")
+        self.mqtt_client = client
+
+    def cerrar(self):
+        if self.mqtt_client is not None:
+            try:
+                self.mqtt_client.loop_stop()
+                self.mqtt_client.disconnect()
+            except Exception:
+                pass
+            self.mqtt_client = None
+
+    def _publicar(self, topic: str, payload_str: str, es_unico: bool = True) -> bool:
+        if self.mqtt_client is None:
+            return False
+        try:
+            info = self.mqtt_client.publish(topic, payload_str, qos=1)
+            if info.rc == mqtt.MQTT_ERR_SUCCESS:
+                self.stats["mqtt_publishes"] += 1
+                if es_unico:
+                    self.stats["sent_unique"] += 1
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _enviar_con_fallos(self, topic: str, payload_str: str) -> str:
+        self.stats["generated"] += 1
+
+        if random.random() < self.fault_cfg["drop_prob"]:
+            self.stats["dropped"] += 1
+            return "DROPPED"
+
+        if random.random() < self.fault_cfg["delay_prob"]:
+            self.stats["delayed"] += 1
+            delay_s = random.uniform(0.2, max(0.2, self.fault_cfg["max_delay"]))
+            threading.Timer(delay_s, self._publicar, args=(topic, payload_str, True)).start()
+            return f"DELAYED({delay_s:.1f}s)"
+
+        ok = self._publicar(topic, payload_str, es_unico=True)
+        if not ok:
+            return "MQTT_NOT_CONN"
+
+        if random.random() < self.fault_cfg["dup_prob"]:
+            self.stats["duplicated_extra"] += 1
+            self._publicar(topic, payload_str, es_unico=False)
+            return "DUPLICATED"
+
+        return "MQTT_OK"
+
+    def run(self):
+        while not stop_event.is_set():
+            self.tick += 1
+
+            # Frenada periódica cada 30 ticks para producir alertas en ambas zonas RSU-1 y RSU-2
+            if (self.tick % 30) in (8, 9):
+                self.aceleracion = -6.0
+            elif self.velocidad_ms < self.vel_base_ms:
+                self.aceleracion = 3.0
+            else:
+                self.aceleracion = 0.0
+
+            self.velocidad_ms = max(5.0, min(self.vel_base_ms, self.velocidad_ms + self.aceleracion * self.dt))
+            self.posicion_x += self.velocidad_ms * self.dt
+
+            # Al llegar al final del tramo (2000m), reentra por X=0m para mantener tráfico continuo
+            if self.posicion_x >= HIGHWAY_LENGTH_M:
+                self.posicion_x = round(self.posicion_x - HIGHWAY_LENGTH_M, 2)
+                with print_lock:
+                    print(f" 🔄 [REENTRADA] {self.veh_id} completó los 2000m y reentra al inicio del tramo (X={self.posicion_x}m)")
+
+            pos_x = round(self.posicion_x, 2)
+            vel_kmh = round(self.velocidad_ms * 3.6, 2)
+            accel = round(self.aceleracion, 2)
+
+            rsu_destino = "rsu-1" if self.posicion_x < 1000.0 else "rsu-2"
+            if rsu_destino != self.rsu_actual:
+                with print_lock:
+                    print(f"\n 📡 [HANDOVER] {self.veh_id} cambió de celda (X={pos_x}m): {self.rsu_actual} ---> {rsu_destino}\n")
+                self.rsu_actual = rsu_destino
+                self._conectar_mqtt(self.rsu_actual)
+
+            if accel <= BRAKING_THRESHOLD:
+                event_type = "SUDDEN_BRAKING"
+            else:
+                event_type = "POSITION" if self.tick % 2 == 0 else "SPEED"
+
+            evento = {
+                "event_id": f"evt-{uuid.uuid4().hex[:10]}",
+                "source_id": self.veh_id,
+                "event_type": event_type,
+                "event_time": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                "location": {"posicion_x": pos_x},
+                "payload": {"velocidad": vel_kmh, "aceleracion": accel},
+            }
+
+            topic = f"v2x/{self.rsu_actual}/telemetry"
+            estado_envio = self._enviar_con_fallos(topic, json.dumps(evento))
+
+            with print_lock:
+                freno_str = " [!] FRENADA" if accel <= BRAKING_THRESHOLD else ""
+                print(
+                    f"[{estado_envio:<14}] [{self.rsu_actual.upper()}] {self.veh_id} | "
+                    f"{event_type:<14} | X: {pos_x:>7.2f}m | V: {vel_kmh:>6.2f}km/h | A: {accel:>5.2f}m/s²{freno_str}"
+                )
+
+            time.sleep(self.dt)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Simulador V2X Lineal con Handover e Inyección de Fallos")
+    parser.add_argument("--num-vehicles", type=int, default=5)
+    parser.add_argument("--dt", type=float, default=1.0)
+    parser.add_argument("--duration", type=float, default=60.0, help="Duración en segundos (0 = infinito hasta Ctrl+C)")
+    parser.add_argument("--rsu1-host", default="localhost")
+    parser.add_argument("--rsu1-port", type=int, default=1883)
+    parser.add_argument("--rsu2-host", default="localhost")
+    parser.add_argument("--rsu2-port", type=int, default=1884)
+    parser.add_argument("--drop-prob", type=float, default=0.0)
+    parser.add_argument("--dup-prob", type=float, default=0.0)
+    parser.add_argument("--delay-prob", type=float, default=0.0)
+    parser.add_argument("--max-delay", type=float, default=2.0)
+    args = parser.parse_args()
+
+    rsu_endpoints = {
+        "rsu-1": (args.rsu1_host, args.rsu1_port),
+        "rsu-2": (args.rsu2_host, args.rsu2_port),
+    }
+    fault_cfg = {
+        "drop_prob": args.drop_prob,
+        "dup_prob": args.dup_prob,
+        "delay_prob": args.delay_prob,
+        "max_delay": args.max_delay,
     }
 
-    response = sqs.send_message(
-        QueueUrl=queue_url,
-        MessageBody=json.dumps(evento_v2x)
-    )
+    # Posiciones iniciales repartidas entre RSU-1 (400, 480, 560m) y RSU-2 (1200, 1280m)
+    posiciones_base = [400.0, 480.0, 560.0, 1200.0, 1280.0]
+    num_veh = max(5, args.num_vehicles)
 
-    print(f"Enviado -> Vehículo: {source_id} | Tipo: {event_type} | ID SQS: {response['MessageId']}")
-    time.sleep(0.5)
+    hilos = []
+    for i in range(num_veh):
+        pos_ini = posiciones_base[i] if i < len(posiciones_base) else (200.0 + (i * 150.0) % 1600.0)
+        h = VehiculoOBU(f"veh-{i + 1:03d}", pos_inicial=pos_ini, vel_ms=32.0, dt=args.dt, rsu_endpoints=rsu_endpoints, fault_cfg=fault_cfg)
+        hilos.append(h)
+        h.start()
 
-print("Simulación de lote completada con éxito.")
+    inicio = time.monotonic()
+    try:
+        while True:
+            if args.duration > 0 and (time.monotonic() - inicio) >= args.duration:
+                break
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_event.set()
+        for h in hilos:
+            h.join(timeout=1.5)
+            h.cerrar()
+
+        totales = {"generated": 0, "sent_unique": 0, "mqtt_publishes": 0, "dropped": 0, "delayed": 0, "duplicated_extra": 0}
+        por_vehiculo = {}
+        print("\n=== RESUMEN DE ENVÍOS DEL SIMULADOR ===")
+        for h in hilos:
+            por_vehiculo[h.veh_id] = dict(h.stats)
+            print(f" {h.veh_id}: {h.stats}")
+            for k in totales:
+                totales[k] += h.stats[k]
+
+        print(f" TOTALES: {totales}")
+        with open("simulador_ground_truth.json", "w", encoding="utf-8") as f:
+            json.dump({"timestamp": datetime.now(timezone.utc).isoformat(), "totals": totales, "per_vehicle": por_vehiculo}, f, indent=2)
