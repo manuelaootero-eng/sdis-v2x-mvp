@@ -11,3 +11,4 @@ guia_presentacion.txt
 .vscode/
 .idea/
 .env
+.venv
