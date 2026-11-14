@@ -1,4 +1,5 @@
 import collections
+import math
 import threading
 import time
 
@@ -20,19 +21,32 @@ def clasificar_telemetria(velocidad_kmh: float, aceleracion_ms2: float) -> str:
 
 
 def validar_esquema_evento(evento: dict) -> tuple[bool, str]:
-    """Verifica campos obligatorios y formato numérico básico."""
+    """Verifica campos obligatorios, tipos y formato numérico (rechaza NaN/inf)."""
     if not isinstance(evento, dict) or not REQUIRED_FIELDS.issubset(evento.keys()):
         return False, "Faltan campos obligatorios"
 
-    if evento.get("event_type") not in VALID_EVENT_TYPES:
+    for campo in ("event_id", "source_id", "event_time"):
+        if not isinstance(evento[campo], str) or not evento[campo].strip():
+            return False, f"{campo} debe ser un string no vacío"
+
+    tipo = evento["event_type"]
+    if not isinstance(tipo, str) or tipo not in VALID_EVENT_TYPES:
         return False, "event_type inválido"
 
+    if not isinstance(evento["location"], dict) or not isinstance(evento["payload"], dict):
+        return False, "location y payload deben ser objetos"
+
     try:
-        float(evento["location"]["posicion_x"])
-        float(evento["payload"]["velocidad"])
-        float(evento["payload"]["aceleracion"])
+        valores = [
+            float(evento["location"]["posicion_x"]),
+            float(evento["payload"]["velocidad"]),
+            float(evento["payload"]["aceleracion"]),
+        ]
     except (KeyError, ValueError, TypeError):
         return False, "Formato numérico inválido en location o payload"
+
+    if not all(math.isfinite(v) for v in valores):
+        return False, "Valores numéricos no finitos (NaN/inf)"
 
     return True, "OK"
 
@@ -57,6 +71,11 @@ class DeduplicadorEventos:
             self.vistos[event_id] = now
             return False
 
+    def olvidar(self, event_id: str):
+        """Deshace el registro de un evento (p. ej. si falló su persistencia y se reintentará)."""
+        with self.lock:
+            self.vistos.pop(event_id, None)
+
 
 class ControladorCooldown:
     """Ventana de enfriamiento por clave para evitar tormentas de alertas."""
@@ -78,12 +97,16 @@ class ControladorCooldown:
 class DetectorHazard:
     """
     Detecta peligro colectivo (HAZARD_DETECTED) cuando 2 o más vehículos frenan
-    a una distancia lineal abs(pos1 - pos2) <= 250m dentro de una ventana de 5s.
+    a una distancia lineal abs(pos1 - pos2) <= 250 m dentro de una ventana de 5 s.
+    Tras disparar un peligro, se suprimen nuevos peligros a <= 250 m del anterior
+    durante cooldown_s segundos (un mismo incidente genera una sola alerta).
     """
-    def __init__(self, time_window_s: float = 5.0, max_distance_m: float = 250.0):
+    def __init__(self, time_window_s: float = 5.0, max_distance_m: float = 250.0, cooldown_s: float = 10.0):
         self.time_window_s = time_window_s
         self.max_distance_m = max_distance_m
+        self.cooldown_s = cooldown_s
         self.frenadas = {}  # veh_id -> (ts_unix, posicion_x)
+        self.hazards_recientes = []  # [(ts_unix, posicion_x)]
         self.lock = threading.Lock()
 
     def registrar_frenada(self, source_id: str, ts_unix: float, posicion_x: float) -> list[str]:
@@ -94,6 +117,10 @@ class DetectorHazard:
                 if abs(ts_unix - t) <= self.time_window_s
             }
             self.frenadas[source_id] = (ts_unix, pos_x)
+            self.hazards_recientes = [
+                (t, p) for (t, p) in self.hazards_recientes
+                if abs(ts_unix - t) < self.cooldown_s
+            ]
 
             implicados = [
                 vid for vid, (t, pos) in self.frenadas.items()
@@ -101,6 +128,9 @@ class DetectorHazard:
             ]
 
             if len(implicados) >= 2:
+                if any(abs(pos_x - p) <= self.max_distance_m for (_, p) in self.hazards_recientes):
+                    return []
+                self.hazards_recientes.append((ts_unix, pos_x))
                 implicados.sort()
                 for vid in implicados:
                     self.frenadas.pop(vid, None)
@@ -142,7 +172,7 @@ class MetricasV2X:
         with self.lock:
             lats = sorted(self.latencias_ms)
             p95 = round(lats[int(len(lats) * 0.95)], 2) if lats else 0.0
-            res = {"counters": dict(self.contadores), "latency_p95_ms": p95}
+            res = {"counters": dict(self.contadores), "latency_samples": len(lats), "latency_p95_ms": p95}
             if extra:
                 res.update(extra)
             return res

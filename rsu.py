@@ -60,7 +60,7 @@ def publicar_alerta_mqtt_local(tipo_alerta: str, mensaje: str, origen: str = "RS
 
 
 def encolar_para_sqs(evento: dict):
-    """Política drop-oldest cuando el buffer alcanza MAX_BUFFER_SIZE."""
+    """Política drop-oldest: si el buffer está lleno se descarta el evento más antiguo."""
     with buffer_lock:
         if len(sqs_buffer) >= MAX_BUFFER_SIZE:
             sqs_buffer.popleft()
@@ -69,17 +69,20 @@ def encolar_para_sqs(evento: dict):
 
 
 def _reencolar_frente(eventos: list):
-    """Reinserta eventos al principio del buffer conservando su orden original."""
+    """
+    Reinserta eventos al principio del buffer conservando su orden original.
+    Son los más antiguos: si no caben, se descartan ellos (coherente con drop-oldest).
+    """
     with buffer_lock:
         for ev in reversed(eventos):
             if len(sqs_buffer) >= MAX_BUFFER_SIZE:
-                sqs_buffer.pop()
                 metricas.inc("dropped_buffer")
+                continue
             sqs_buffer.appendleft(ev)
 
 
 def enviar_lote_sqs_una_vez() -> bool:
-    """Extrae hasta 10 eventos del buffer y los envía a SQS."""
+    """Extrae hasta 10 eventos del buffer y los envía a SQS. True si al menos uno se entregó."""
     global queue_url, en_fallo_sqs
     with buffer_lock:
         lote = [sqs_buffer.popleft() for _ in range(min(10, len(sqs_buffer)))]
@@ -95,20 +98,20 @@ def enviar_lote_sqs_una_vez() -> bool:
         resp = sqs_client.send_message_batch(QueueUrl=queue_url, Entries=entries)
 
         exitosos = len(resp.get("Successful", []))
+        fallidos = resp.get("Failed", [])
+
+        if fallidos:
+            ids_fallidos = {f["Id"] for f in fallidos}
+            eventos_fallidos = [ev for i, ev in enumerate(lote) if f"msg-{i}" in ids_fallidos]
+            _reencolar_frente(eventos_fallidos)
+
         if exitosos > 0:
             metricas.inc("forwarded_or_persisted", exitosos)
             if en_fallo_sqs:
                 ts_now = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
                 print(f" ✅ [RSU RECOVERY] {ts_now} - Conexión SQS restaurada. Drenando buffer ({len(sqs_buffer)} restantes).")
                 en_fallo_sqs = False
-
-        fallidos = resp.get("Failed", [])
-        if fallidos:
-            ids_fallidos = {f["Id"] for f in fallidos}
-            eventos_fallidos = [ev for i, ev in enumerate(lote) if f"msg-{i}" in ids_fallidos]
-            _reencolar_frente(eventos_fallidos)
-
-        return True
+        return exitosos > 0
     except Exception as e:
         if not en_fallo_sqs:
             ts_now = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
@@ -129,6 +132,8 @@ def on_mqtt_connect(client, userdata, flags, rc):
         topic = f"v2x/{RSU_ID}/telemetry"
         client.subscribe(topic, qos=1)
         print(f" [RSU {RSU_ID}] Suscrito a '{topic}'")
+    else:
+        print(f" [RSU {RSU_ID}] Conexión MQTT rechazada rc={rc}")
 
 
 def on_mqtt_message(client, userdata, msg):
@@ -173,7 +178,7 @@ def on_mqtt_message(client, userdata, msg):
             encolar_para_sqs(evento)
             return
 
-        # 2. Filtrado Edge: muestreo 1 de cada 3 mensajes para telemetría rutinaria
+        # 2. Filtrado Edge: muestreo 1 de cada EDGE_SAMPLE_RATE mensajes rutinarios por vehículo
         cuenta = contador_rutinario_veh.get(veh_id, 0) + 1
         contador_rutinario_veh[veh_id] = cuenta
         if cuenta % EDGE_SAMPLE_RATE == 0:
