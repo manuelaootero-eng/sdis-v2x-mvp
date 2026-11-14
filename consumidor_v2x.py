@@ -62,7 +62,7 @@ def inicializar_aws():
         try:
             fn()
         except Exception:
-            pass
+            pass  # ya existen
 
 
 def enviar_cloudwatch(mensaje: str):
@@ -92,6 +92,7 @@ def publicar_sns(tipo_alerta: str, mensaje: str, metadata: dict):
 
 
 def guardar_evento_dynamodb(nombre_tabla: str, item: dict, pk_field: str = "event_id") -> str:
+    """Inserción idempotente: devuelve 'STORED' o 'DUPLICATE'; cualquier otro error se propaga."""
     if dynamodb is None:
         return "STORED"
     tabla = dynamodb.Table(nombre_tabla)
@@ -106,6 +107,7 @@ def guardar_evento_dynamodb(nombre_tabla: str, item: dict, pk_field: str = "even
 
 
 def procesar_evento(body: dict) -> bool:
+    """Devuelve True si el mensaje de SQS puede borrarse; False si debe reintentarse."""
     metricas.inc("received")
 
     valido, _ = validar_esquema_evento(body)
@@ -127,7 +129,7 @@ def procesar_evento(body: dict) -> bool:
     try:
         resultado_db = guardar_evento_dynamodb(DYNAMO_EVENTS_TABLE, body, pk_field="event_id")
     except Exception as e:
-        deduplicador.vistos.pop(event_id, None)
+        deduplicador.olvidar(event_id)  # permite que el reintento de SQS se procese
         print(f" [DYNAMO ERROR] {e}")
         return False
 
@@ -201,15 +203,24 @@ def leer_sqs_continuamente():
 
             borrados = []
             for msg in mensajes:
+                entrada = {"Id": msg["MessageId"], "ReceiptHandle": msg["ReceiptHandle"]}
                 try:
                     body = json.loads(msg["Body"])
-                    if procesar_evento(body):
-                        borrados.append({"Id": msg["MessageId"], "ReceiptHandle": msg["ReceiptHandle"]})
                 except ValueError:
-                    borrados.append({"Id": msg["MessageId"], "ReceiptHandle": msg["ReceiptHandle"]})
+                    borrados.append(entrada)  # JSON corrupto: no tiene sentido reintentarlo
+                    continue
+
+                try:
+                    if procesar_evento(body):
+                        borrados.append(entrada)
+                except Exception as e:
+                    # El mensaje queda en la cola (se reentregará) pero no bloquea al resto del lote
+                    print(f" [ERROR] Fallo procesando {msg['MessageId']}: {e}")
 
             if borrados:
-                sqs.delete_message_batch(QueueUrl=queue_url, Entries=borrados)
+                resp_del = sqs.delete_message_batch(QueueUrl=queue_url, Entries=borrados)
+                if resp_del.get("Failed"):
+                    print(f" [SQS WARN] No se pudieron borrar {len(resp_del['Failed'])} mensajes (se reentregarán).")
         except Exception as e:
             print(f" [SQS ERROR] {e}")
             time.sleep(2.0)
