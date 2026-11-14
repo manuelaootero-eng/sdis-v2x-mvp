@@ -46,6 +46,8 @@ class VehiculoOBU(threading.Thread):
         self.stats = {k: 0 for k in STAT_KEYS}
         self.stats_lock = threading.Lock()
 
+        self.conectado_evento = threading.Event()
+        
         self.rsu_actual = "rsu-1" if self.posicion_x < 1000.0 else "rsu-2"
         self.mqtt_client = None
         self._conectar_mqtt(self.rsu_actual)
@@ -56,6 +58,8 @@ class VehiculoOBU(threading.Thread):
 
     def _conectar_mqtt(self, rsu_id: str):
         anterior = self.mqtt_client
+        self.conectado_evento.clear()
+
         host, port = self.rsu_endpoints[rsu_id]
         client = mqtt.Client(client_id=f"{self.veh_id}-{rsu_id}-{uuid.uuid4().hex[:6]}")
         client.reconnect_delay_set(min_delay=1, max_delay=5)
@@ -63,6 +67,7 @@ class VehiculoOBU(threading.Thread):
         def on_connect(c, userdata, flags, rc):
             if rc == 0:
                 c.subscribe(f"v2x/{rsu_id}/alerts", qos=1)
+                self.conectado_evento.set()
 
         def on_message(c, userdata, msg):
             try:
@@ -78,6 +83,11 @@ class VehiculoOBU(threading.Thread):
         try:
             client.connect_async(host, port, keepalive=60)
             client.loop_start()
+
+            if not self.conectado_evento.wait(timeout=5.0):
+                with print_lock:
+                    print(f" [MQTT WARN] {self.veh_id} tardó demasiado en asegurar conexión con {rsu_id}.")
+                    
         except Exception as e:
             with print_lock:
                 print(f" [MQTT WARN] {self.veh_id} fallo conectando a {rsu_id} ({host}:{port}): {e}")
