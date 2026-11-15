@@ -1,6 +1,0 @@
-aws configure
-
-python3 productor_v2x.py
-python3 consumidor_v2x.py
-
-
