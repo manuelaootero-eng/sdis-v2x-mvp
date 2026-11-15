@@ -5,7 +5,6 @@ pycache/
 vehiculos_config.txt
 simulador_ground_truth.json
 tests_memoria.txt
-limpiar_dynamo.py
 paracomprobar.txt
 guia_presentacion.txt
 .vscode/
