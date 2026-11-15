@@ -1,0 +1,59 @@
+{
+  "ground_truth": {
+    "generated": 302,
+    "sent_unique": 302,
+    "mqtt_publishes": 302,
+    "dropped": 0,
+    "delayed": 0,
+    "duplicated_extra": 0,
+    "publish_failed": 0
+  },
+  "rsu1": {
+    "buffer_depth": 0,
+    "counters": {
+      "accepted": 148,
+      "alerts_triggered": 5,
+      "dropped_buffer": 0,
+      "duplicates": 0,
+      "filtered_edge": 93,
+      "forwarded_or_persisted": 55,
+      "processed": 148,
+      "received": 148
+    },
+    "latency_p95_ms": 197.65,
+    "latency_samples": 148,
+    "rsu_id": "rsu-1"
+  },
+  "rsu2": {
+    "buffer_depth": 0,
+    "counters": {
+      "accepted": 154,
+      "alerts_triggered": 5,
+      "dropped_buffer": 0,
+      "duplicates": 0,
+      "filtered_edge": 98,
+      "forwarded_or_persisted": 56,
+      "processed": 154,
+      "received": 154
+    },
+    "latency_p95_ms": 126.73,
+    "latency_samples": 154,
+    "rsu_id": "rsu-2"
+  },
+  "servicio": {
+    "counters": {
+      "accepted": 111,
+      "alerts_triggered": 24,
+      "dropped_buffer": 0,
+      "duplicates": 0,
+      "filtered_edge": 0,
+      "forwarded_or_persisted": 111,
+      "processed": 111,
+      "received": 111
+    },
+    "latency_p95_ms": 597.31,
+    "latency_samples": 111,
+    "service": "V2X-SERVICE"
+  },
+  "N1": 50
+}
