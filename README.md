@@ -3,7 +3,6 @@
 Sistema distribuido V2X de tres niveles (OBU → RSU Edge → V2X-SERVICE en la nube) sobre AWS Academy (`us-east-1`).
 Autoras: Manuela Outeiro Otero y Eva Deibe de Bernardo · Sistemas Distribuidos (Máster en Ingeniería de Telecomunicación).
 
-![Arquitectura](docs/arquitectura.png)
 
 ## Contenido
 

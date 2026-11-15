@@ -1,12 +1,12 @@
-pycache/
+__pycache__/
 *.py[cod]
 *$py.class
-*.log
 vehiculos_config.txt
 simulador_ground_truth.json
 tests_memoria.txt
 paracomprobar.txt
 guia_presentacion.txt
+aws_configure.txt
 .vscode/
 .idea/
 .env
